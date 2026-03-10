@@ -6,6 +6,7 @@ class GameState(Enum):
     PLAYING = auto()
     ROUND_END = auto()
     SHOP = auto()
+    PACK_OPEN = auto() # 卡包开启状态
     GAME_OVER = auto()
     WIN = auto()
 
