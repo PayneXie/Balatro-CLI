@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs
+.idea/
+.vscode/
+
+# Environment
+venv/
+env/
+
+# Project Specific
+balatro-sample/
