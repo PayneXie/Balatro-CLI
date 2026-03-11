@@ -21,6 +21,8 @@ from .joker import Joker
 from .consumable import Consumable
 from .shop import ShopItem, ShopItemType
 
+from .deck import DeckType
+
 class TUI:
     def __init__(self, game: Game):
         self.game = game
@@ -38,45 +40,147 @@ class TUI:
         # Shop State
         self.shop_cursor_index = 0
         self.shop_zone_index = 0  # 0: Cards, 1: Packs, 2: Voucher
+        self.pack_cursor_index = 0 # Cursor for pack selection
+        
+        # Main Menu State
+        self.deck_select_index = 0
+        
+        # Run Info State
+        self.show_run_info = False # 是否显示 Run Info (牌型等级等)
         
     def run(self):
         """主循环"""
-        self.game.start_game()
+        # self.game.start_game() # 移除自动开始，先进入主菜单选择牌组
+        self.game.state = GameState.MAIN_MENU
         
         # refresh_per_second 不能为 None 或 0，即使 auto_refresh=False
         # 我们设置为一个较低的值即可，因为我们主要靠手动刷新
         with Live(self.render_layout(), refresh_per_second=4, screen=True, auto_refresh=False) as live:
             self.live = live # 保存引用以便手动刷新
             
+            # 初始刷新一次
+            live.update(self.render_layout(), refresh=True)
+            
             while True:
                 # 只有在状态改变或用户输入后才刷新
                 # 但由于我们这里是简单的轮询，我们先限制帧率，并只在必要时 update
                 
-                # 强制刷新一次以显示初始状态
-                live.update(self.render_layout(), refresh=True)
+                # 移除这里的强制刷新 live.update(self.render_layout(), refresh=True)
                 
                 if self.game.state == GameState.GAME_OVER or self.game.state == GameState.WIN:
+                    # 游戏结束时仍然需要刷新一次以显示最终状态
+                    live.update(self.render_layout(), refresh=True)
+                    
                     if msvcrt.kbhit():
                          break
                     time.sleep(0.05)
                     continue
 
                 input_processed = False
-                if self.game.state == GameState.BLIND_SELECT:
-                    input_processed = self.handle_blind_select_input()
-                elif self.game.state == GameState.PLAYING:
-                    input_processed = self.handle_playing_input()
-                elif self.game.state == GameState.ROUND_END:
-                    input_processed = self.handle_round_end_input()
-                elif self.game.state == GameState.SHOP:
-                    input_processed = self.handle_shop_input()
+                
+                # Check for global toggle keys (like 'i' for run info)
+                if msvcrt.kbhit():
+                    # Peek or get key to check for 'i'
+                    # msvcrt doesn't support peek well for specific keys without consuming
+                    # So we need a better input handling strategy.
+                    # Let's integrate into each handler or have a pre-check.
+                    pass
+                
+                # Pre-check for 'i' key to toggle Run Info
+                # This is tricky with msvcrt as getch consumes the key.
+                # We'll implement it by checking inside the specific handlers or
+                # modifying the loop structure.
+                
+                # Better approach: 
+                # Let's add 'i' check to all input handlers or unify input handling.
+                # Since we have separate handlers, we can add a common check at the start of each.
+                # But that duplicates code.
+                
+                # Let's try to capture key first? No, context sensitive.
+                
+                # Let's just add 'i' to handle_playing_input, handle_shop_input, etc.
+                # Or, if show_run_info is True, we capture all input until closed.
+                
+                if self.show_run_info:
+                    if msvcrt.kbhit():
+                        key = msvcrt.getch()
+                        if key == b'i' or key == b'\x1b': # I or ESC to close
+                            self.show_run_info = False
+                            input_processed = True
+                        # Consume other keys or ignore
+                    else:
+                        time.sleep(0.05)
+                        continue
+                else:
+                    if self.game.state == GameState.BLIND_SELECT:
+                        input_processed = self.handle_blind_select_input()
+                    elif self.game.state == GameState.PLAYING:
+                        input_processed = self.handle_playing_input()
+                    elif self.game.state == GameState.ROUND_END:
+                        input_processed = self.handle_round_end_input()
+                    elif self.game.state == GameState.SHOP:
+                        input_processed = self.handle_shop_input()
+                    elif self.game.state == GameState.PACK_OPEN:
+                        input_processed = self.handle_pack_open_input()
+                    elif self.game.state == GameState.MAIN_MENU:
+                        input_processed = self.handle_main_menu_input()
                 
                 # 只有当处理了输入时，才立即刷新，否则等待
-                if not input_processed:
+                if input_processed:
+                    # 如果需要显示 Run Info，则覆盖渲染
+                    if self.show_run_info:
+                        live.update(self.render_run_info(), refresh=True)
+                    else:
+                        live.update(self.render_layout(), refresh=True)
+                else:
                     time.sleep(0.05)
                 # 注意：Rich Live 的 update 会在下一次 refresh 时生效
                 # 或者我们可以显式调用 refresh() 如果 auto_refresh=False
 
+
+    def handle_common_input(self):
+        """处理全局通用按键 (如 I 键查看信息)"""
+        if msvcrt.kbhit():
+            key = msvcrt.getch()
+            
+            # I: Toggle Run Info
+            if key == b'i':
+                self.show_run_info = not self.show_run_info
+                return True
+                
+            # ESC: Close Run Info if open
+            if key == b'\x1b' and self.show_run_info:
+                self.show_run_info = False
+                return True
+                
+            return False
+        return False
+
+    def handle_main_menu_input(self) -> bool:
+        if msvcrt.kbhit():
+            key = msvcrt.getch()
+            processed = True
+            
+            decks = list(DeckType)
+            
+            if key == b'\xe0': # Arrows
+                key = msvcrt.getch()
+                if key == b'H': # Up
+                    self.deck_select_index = max(0, self.deck_select_index - 1)
+                elif key == b'P': # Down
+                    self.deck_select_index = min(len(decks) - 1, self.deck_select_index + 1)
+                else:
+                    processed = False
+            elif key == b'\r': # Enter
+                selected_deck = decks[self.deck_select_index]
+                self.game.start_game(selected_deck)
+            elif key == b'q':
+                exit()
+            else:
+                processed = False
+                
+            return processed
+        return False
 
     def handle_blind_select_input(self) -> bool:
         # Press Enter to start round, S to skip, Q to quit
@@ -159,10 +263,45 @@ class TUI:
             return processed
         return False
 
+    def handle_pack_open_input(self) -> bool:
+        if msvcrt.kbhit():
+            key = msvcrt.getch()
+            processed = True
+            
+            # Global keys
+            if key == b'i':
+                self.show_run_info = not self.show_run_info
+                return True
+
+            if key == b'\xe0': # Arrows
+                key = msvcrt.getch()
+                if key == b'K': # Left
+                    self.pack_cursor_index = max(0, self.pack_cursor_index - 1)
+                elif key == b'M': # Right
+                    self.pack_cursor_index = min(len(self.game.pack_choices) - 1, self.pack_cursor_index + 1)
+                else:
+                    processed = False
+            elif key == b'\r': # Enter -> Select
+                self.game.select_pack_item(self.pack_cursor_index)
+                self.pack_cursor_index = 0 # Reset cursor
+            elif key == b's': # Skip
+                self.game.skip_pack()
+                self.pack_cursor_index = 0
+            else:
+                processed = False
+                
+            return processed
+        return False
+
     def handle_playing_input(self) -> bool:
         if msvcrt.kbhit():
             key = msvcrt.getch()
             processed = True
+            
+            # Global keys
+            if key == b'i':
+                self.show_run_info = not self.show_run_info
+                return True
             
             # Handle special keys (arrows)
             if key == b'\xe0':
@@ -181,6 +320,7 @@ class TUI:
                         self.focus_area = "hand"
                     elif self.focus_area == "hand":
                         self.focus_area = "actions"
+                        self.action_index = 0
                     elif self.focus_area == "actions" and self.game.consumables:
                         self.focus_area = "consumables"
                         self.consumable_index = 0
@@ -191,6 +331,8 @@ class TUI:
                         self.action_index = max(0, self.action_index - 1)
                     elif self.focus_area == "jokers":
                         self.joker_index = max(0, self.joker_index - 1)
+                    elif self.focus_area == "consumables":
+                        self.consumable_index = max(0, self.consumable_index - 1)
                 elif key == b'M': # Right
                     if self.focus_area == "hand":
                         self.cursor_index = min(len(self.game.hand) - 1, self.cursor_index + 1)
@@ -198,6 +340,8 @@ class TUI:
                         self.action_index = min(1, self.action_index + 1)
                     elif self.focus_area == "jokers":
                         self.joker_index = min(len(self.game.jokers) - 1, self.joker_index + 1)
+                    elif self.focus_area == "consumables":
+                        self.consumable_index = min(len(self.game.consumables) - 1, self.consumable_index + 1)
                 else:
                     processed = False
             
@@ -227,6 +371,15 @@ class TUI:
                             self.selected_indices.add(self.cursor_index)
                 elif self.focus_area == "consumables":
                     self.use_consumable()
+                    
+                    # 使用后如果消耗品列表为空，则自动切回 actions
+                    if not self.game.consumables:
+                        self.focus_area = "actions"
+                        self.consumable_index = 0
+                    else:
+                        # 否则保持在消耗品区，但修正 index
+                        self.consumable_index = min(self.consumable_index, len(self.game.consumables) - 1)
+                        
                 elif self.focus_area == "jokers":
                     if self.game.jokers and self.joker_index < len(self.game.jokers):
                         joker = self.game.jokers[self.joker_index]
@@ -325,6 +478,10 @@ class TUI:
             layout.update(self.render_round_end())
         elif self.game.state == GameState.SHOP:
             layout.update(self.render_shop())
+        elif self.game.state == GameState.PACK_OPEN:
+            layout.update(self.render_pack_open())
+        elif self.game.state == GameState.MAIN_MENU:
+            layout.update(self.render_main_menu())
         elif self.game.state == GameState.GAME_OVER:
             layout.update(Panel("GAME OVER", style="bold red"))
         elif self.game.state == GameState.WIN:
@@ -532,6 +689,147 @@ class TUI:
         
         return Panel(content, title="Shop")
 
+    def render_pack_open(self) -> Panel:
+        if not self.game.pack_choices:
+            return Panel(Text("No items generated!", style="red"), title="Pack Error")
+            
+        # Choices Grid
+        choices_grid = Table.grid(padding=2, expand=True)
+        choices_grid.add_column(justify="center")
+        
+        row_panels = []
+        for i, item in enumerate(self.game.pack_choices):
+            border_style = "white"
+            box_type = box.ROUNDED
+            title = ""
+            
+            if i == self.pack_cursor_index:
+                border_style = "bold yellow"
+                box_type = box.HEAVY
+                title = "Select"
+            
+            # Determine content based on payload type
+            content = Text()
+            
+            # Check for Playing Card payload (Standard Pack)
+            # We need to import Card here or check type name
+            payload_type = type(item.payload).__name__
+            
+            if payload_type == 'Card':
+                # Re-use get_card_art logic but centered
+                content = self.get_card_art(item.payload)
+                # Add enhancement text if any?
+                pass
+            elif payload_type == 'Joker':
+                content.append(f"{item.payload.name_cn}\n", style="bold blue")
+                content.append(f"{item.payload.desc}\n", style="dim")
+            elif payload_type == 'Consumable':
+                content.append(f"{item.payload.name_cn}\n", style="bold magenta")
+                content.append(f"{item.payload.type.name}\n", style="dim")
+                content.append(f"{item.payload.desc}\n", style="dim")
+            
+            panel = Panel(
+                content,
+                border_style=border_style,
+                box=box_type,
+                width=20,
+                height=8,
+                title=title
+            )
+            row_panels.append(panel)
+            
+        # Put panels in a grid row
+        panels_table = Table.grid(padding=2)
+        panels_table.add_row(*row_panels)
+        
+        # Main Layout
+        layout = Table.grid(expand=True)
+        layout.add_column(justify="center")
+        layout.add_row(Text("CHOOSE ONE", style="bold yellow"))
+        layout.add_row("")
+        layout.add_row(panels_table)
+        layout.add_row("")
+        layout.add_row(Text("Controls: Arrows=Select, Enter=Confirm, S=Skip", style="dim"))
+        
+        return Panel(layout, title="Pack Open")
+
+    def render_main_menu(self) -> Panel:
+        from .deck import DeckType
+        
+        decks = list(DeckType)
+        deck_rows = []
+        
+        for i, deck in enumerate(decks):
+            style = "white"
+            box_type = box.ROUNDED
+            
+            if i == self.deck_select_index:
+                style = "bold yellow"
+                box_type = box.HEAVY
+            
+            desc = ""
+            if deck == DeckType.RED: desc = "+1 Discard per round"
+            elif deck == DeckType.BLUE: desc = "+1 Hand per round"
+            elif deck == DeckType.YELLOW: desc = "Start with extra $10"
+            elif deck == DeckType.CHECKERED: desc = "26 Spades and 26 Hearts"
+            
+            content = Text()
+            content.append(f"{deck.name} DECK\n", style="bold")
+            content.append(f"{desc}", style="dim")
+            
+            panel = Panel(
+                content,
+                border_style=style,
+                box=box_type,
+                width=40
+            )
+            deck_rows.append(panel)
+            
+        grid = Table.grid(padding=1)
+        grid.add_column(justify="center") # Ensure grid column is centered
+        for row in deck_rows:
+            grid.add_row(row)
+            
+        layout = Table.grid(expand=True)
+        layout.add_column(justify="center")
+        layout.add_row(Text("BALATRO CLI", style="bold blue reverse"))
+        layout.add_row("")
+        layout.add_row(Text("Select a Deck", style="bold"))
+        layout.add_row("")
+        layout.add_row(grid)
+        layout.add_row("")
+        layout.add_row(Text("Controls: Up/Down=Select, Enter=Start, Q=Quit", style="dim"))
+        
+        return Panel(layout, title="Main Menu")
+
+    def render_run_info(self) -> Panel:
+        """渲染 Run Info 界面 (牌型等级等)"""
+        # Hand Levels
+        hand_table = Table(title="Poker Hands", box=box.ROUNDED)
+        hand_table.add_column("Hand Type", justify="left")
+        hand_table.add_column("Level", justify="center")
+        hand_table.add_column("Chips", justify="right", style="blue")
+        hand_table.add_column("Mult", justify="right", style="red")
+        
+        for hand_type, data in self.game.hand_levels.items():
+            hand_table.add_row(
+                hand_type.name,
+                str(data["level"]),
+                str(data["chips"]),
+                str(data["mult"])
+            )
+            
+        # Layout
+        layout = Table.grid(expand=True)
+        layout.add_column(justify="center")
+        layout.add_row(Text("RUN INFO", style="bold yellow"))
+        layout.add_row("")
+        layout.add_row(hand_table)
+        layout.add_row("")
+        layout.add_row(Text("Press I or ESC to close", style="dim"))
+        
+        return Panel(layout, title="Run Info", border_style="bold white")
+
     def render_header(self) -> Table:
         grid = Table.grid(expand=True)
         grid.add_column(justify="left", ratio=1)
@@ -546,10 +844,11 @@ class TUI:
         # Calculate potential score of selected cards
         potential_text = ""
         if self.selected_indices:
+            # 使用 Game 类的 calculate_potential_score 方法，包含 Joker 效果
+            score, chips, mult = self.game.calculate_potential_score(list(self.selected_indices))
             selected_cards = [self.game.hand[i] for i in self.selected_indices if i < len(self.game.hand)]
             if selected_cards:
                 hand_type = HandEvaluator.evaluate(selected_cards)
-                score, chips, mult = HandEvaluator.calculate_score(selected_cards)
                 potential_text = f" | 选中: {hand_type.name} ({chips} x {mult} = {score})"
 
         content = Text()
@@ -677,6 +976,7 @@ class TUI:
         msg_grid = Table.grid(expand=True)
         msg_grid.add_row(grid)
         msg_grid.add_row(Text(self.message, justify="center", style="yellow"))
+        msg_grid.add_row(Text("Press I for Run Info", justify="center", style="dim"))
             
         return msg_grid
 

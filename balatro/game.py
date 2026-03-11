@@ -1,6 +1,6 @@
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from .card import Card, CardType
-from .deck import Deck
+from .deck import Deck, DeckType
 from .enums import GameState, BlindType
 from .blind import Blind
 from .hand_analysis import HandEvaluator, HandType
@@ -12,7 +12,8 @@ class Game:
     def __init__(self):
         # 基础状态
         self.state = GameState.MAIN_MENU
-        self.deck = Deck()
+        self.deck_type = DeckType.RED # Default
+        self.deck = Deck(self.deck_type)
         self.hand: List[Card] = []
         self.jokers: List[Joker] = [] # 当前拥有的 Joker
         self.consumables: List[Consumable] = [] # 当前拥有的消耗品
@@ -45,7 +46,7 @@ class Game:
         # 游戏配置
         self.max_hand_size = 8
         self.max_hands = 4
-        self.max_discards = 4
+        self.max_discards = 3 # 默认3次
         self.max_ante = 8
         self.max_interest = 5
         self.interest_per_5 = 1
@@ -221,6 +222,17 @@ class Game:
             if len(self.consumables) < self.max_consumables:
                 self.consumables.append(item.payload)
                 success = True
+                
+            # 如果是星球包，选择后自动使用 (参考 Balatro 原版机制)
+            if success and item.type == ShopItemType.PLANET:
+                # 立即使用该星球牌
+                # 星球牌不需要目标，直接对 game 生效
+                item.payload.use(self, None)
+                # 从 consumables 移除刚刚添加的这个星球牌
+                self.consumables.pop() 
+                # 或者更简单：根本不添加到 consumables，直接使用
+                # 但上面的代码已经添加了，所以 pop 掉
+                
         
         if success:
             self.state = GameState.SHOP # Return to shop
@@ -311,10 +323,11 @@ class Game:
             return True
         return False
 
-    def start_game(self):
+    def start_game(self, deck_type: DeckType = DeckType.RED):
         """开始新游戏"""
         self.state = GameState.BLIND_SELECT
-        self.deck = Deck()
+        self.deck_type = deck_type
+        self.deck = Deck(deck_type)
         self.money = 4  # 初始资金
         self.ante = 1
         self.round = 0
@@ -322,6 +335,18 @@ class Game:
         self.consumables = []
         self.hand_levels = self._init_hand_levels()
         self.current_blind_type = BlindType.SMALL
+        
+        # Apply Deck Effects
+        self.max_hands = 4
+        self.max_discards = 3
+        
+        if deck_type == DeckType.RED:
+            self.max_discards += 1 # Red Deck: +1 Discard
+        elif deck_type == DeckType.BLUE:
+            self.max_hands += 1 # Blue Deck: +1 Hand
+        elif deck_type == DeckType.YELLOW:
+            self.money += 10 # Yellow Deck: Start with extra $10
+            
         # 预先加载第一个盲注信息
         self.current_blind = Blind(self.current_blind_type, self.ante)
 
@@ -371,6 +396,80 @@ class Game:
             card = self.deck.draw()
             if card:
                 self.hand.append(card)
+
+    def calculate_potential_score(self, card_indices: List[int]) -> Tuple[int, int, int]:
+        """计算选中牌的潜在得分（包含 Joker 效果）"""
+        if not card_indices:
+            return 0, 0, 0
+            
+        selected_cards = [self.hand[i] for i in sorted(card_indices)]
+        
+        # 1. 识别牌型
+        hand_type = HandEvaluator.evaluate(selected_cards)
+        
+        # 2. 计算基础得分
+        hand_level = self.hand_levels.get(hand_type, {"chips": 0, "mult": 0})
+        base_chips = hand_level["chips"]
+        base_mult = hand_level["mult"]
+        
+        # 计算卡牌筹码
+        card_chips = sum(card.get_value() for card in selected_cards)
+        
+        # 总筹码 = 基础筹码 + 卡牌筹码
+        chips = base_chips + card_chips
+        mult = base_mult
+        
+        # 3. 计算 Joker 效果 (Balatro 的核心计分链)
+        
+        # A. 遍历每一张计分的卡牌
+        for card in selected_cards:
+            # 1. 基础卡牌加成 (Enhancements & Editions)
+            chips += card.get_chip_bonus()
+            mult += card.get_mult_bonus()
+            mult = int(mult * card.get_xmult_bonus())
+            
+            # 2. 触发 Joker: ON_CARD_SCORED
+            effects = self._get_joker_effects(card, JokerEvent.ON_CARD_SCORED)
+            for eff in effects:
+                chips += eff.chips
+                mult += eff.mult
+                if eff.xmult > 0:
+                    mult = int(mult * eff.xmult)
+        
+        # A2. 遍历手牌中未打出的牌 (触发钢卡等 Held in hand 效果)
+        # 注意：在 Balatro 中，Held in Hand 效果通常是在所有计分卡结算完之后触发
+        remaining_hand = [c for i, c in enumerate(self.hand) if i not in card_indices]
+        for card in remaining_hand:
+            # 钢卡效果: 手持时 x1.5 Mult
+            if card.enhancement == CardType.STEEL:
+                mult = int(mult * 1.5)
+            
+            # 触发 Joker: ON_CARD_HELD
+            effects = self._get_joker_effects(card, JokerEvent.ON_CARD_HELD)
+            for eff in effects:
+                chips += eff.chips
+                mult += eff.mult
+                if eff.xmult > 0:
+                    mult = int(mult * eff.xmult)
+        
+        # B. 触发独立 Joker 效果 (INDEPENDENT) - 大多数加倍率的 Joker 在这里
+        # 注意：这里需要传入当前上下文，包括手牌类型、打出的牌、金钱等
+        effects = self._get_joker_effects(None, JokerEvent.INDEPENDENT, {
+            'hand_type': hand_type,
+            'played_cards': selected_cards,
+            'money': self.money,
+            'deck_size': len(self.deck),
+            'jokers': self.jokers,
+            'max_jokers': self.max_jokers
+        })
+        for eff in effects:
+            chips += eff.chips
+            mult += eff.mult
+            if eff.xmult > 0:
+                mult = int(mult * eff.xmult)
+        
+        final_score = chips * mult
+        return final_score, chips, mult
 
     def play_hand(self, card_indices: List[int]):
         """出牌逻辑"""
