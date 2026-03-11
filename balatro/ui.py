@@ -55,63 +55,68 @@ class TUI:
         
         # refresh_per_second 不能为 None 或 0，即使 auto_refresh=False
         # 我们设置为一个较低的值即可，因为我们主要靠手动刷新
-        with Live(self.render_layout(), refresh_per_second=4, screen=True, auto_refresh=False) as live:
-            self.live = live # 保存引用以便手动刷新
-            
-            # 初始刷新一次
-            live.update(self.render_layout(), refresh=True)
-            
-            while True:
-                # 只有在状态改变或用户输入后才刷新
-                # 但由于我们这里是简单的轮询，我们先限制帧率，并只在必要时 update
+        
+        # 在进入 Live 循环前，初始化终端输入模式 (Linux/Mac)
+        self.input.start()
+        
+        try:
+            with Live(self.render_layout(), refresh_per_second=4, screen=True, auto_refresh=False) as live:
+                self.live = live # 保存引用以便手动刷新
                 
-                # 移除这里的强制刷新 live.update(self.render_layout(), refresh=True)
+                # 初始刷新一次
+                live.update(self.render_layout(), refresh=True)
                 
-                if self.game.state == GameState.GAME_OVER or self.game.state == GameState.WIN:
-                    # 游戏结束时仍然需要刷新一次以显示最终状态
-                    live.update(self.render_layout(), refresh=True)
+                while True:
+                    # 只有在状态改变或用户输入后才刷新
+                    # 但由于我们这里是简单的轮询，我们先限制帧率，并只在必要时 update
                     
-                    if self.input.has_input():
-                         break
-                    time.sleep(0.05)
-                    continue
-
-                input_processed = False
-                
-                # Check for global toggle keys (like 'i' for run info)
-                # msvcrt removed, use self.input
-                # if msvcrt.kbhit(): pass 
-                
-                # Pre-check for 'i' key to toggle Run Info
-                # This is tricky with msvcrt as getch consumes the key.
-                # We'll implement it by checking inside the specific handlers or
-                # modifying the loop structure.
-                
-                if self.show_run_info:
-                    key = self.input.get_key()
-                    if key:
-                        if key == 'i' or key == Key.ESCAPE: # I or ESC to close
-                            self.show_run_info = False
-                            input_processed = True
-                        # Consume other keys or ignore
-                    else:
+                    # 移除这里的强制刷新 live.update(self.render_layout(), refresh=True)
+                    
+                    if self.game.state == GameState.GAME_OVER or self.game.state == GameState.WIN:
+                        # 游戏结束时仍然需要刷新一次以显示最终状态
+                        live.update(self.render_layout(), refresh=True)
+                        
+                        if self.input.has_input():
+                             break
                         time.sleep(0.05)
                         continue
-                else:
-                    if self.game.state == GameState.BLIND_SELECT:
-                        input_processed = self.handle_blind_select_input()
-                    elif self.game.state == GameState.PLAYING:
-                        input_processed = self.handle_playing_input()
-                    elif self.game.state == GameState.ROUND_END:
-                        input_processed = self.handle_round_end_input()
-                    elif self.game.state == GameState.SHOP:
-                        input_processed = self.handle_shop_input()
-                    elif self.game.state == GameState.PACK_OPEN:
-                        input_processed = self.handle_pack_open_input()
-                    elif self.game.state == GameState.DECK_VIEW:
-                        input_processed = self.handle_deck_view_input()
-                    elif self.game.state == GameState.MAIN_MENU:
-                        input_processed = self.handle_main_menu_input()
+    
+                    input_processed = False
+                    
+                    # Check for global toggle keys (like 'i' for run info)
+                    # msvcrt removed, use self.input
+                    # if msvcrt.kbhit(): pass 
+                    
+                    # Pre-check for 'i' key to toggle Run Info
+                    # This is tricky with msvcrt as getch consumes the key.
+                    # We'll implement it by checking inside the specific handlers or
+                    # modifying the loop structure.
+                    
+                    if self.show_run_info:
+                        key = self.input.get_key()
+                        if key:
+                            if key == 'i' or key == Key.ESCAPE: # I or ESC to close
+                                self.show_run_info = False
+                                input_processed = True
+                            # Consume other keys or ignore
+                        else:
+                            time.sleep(0.05)
+                            continue
+                    else:
+                        if self.game.state == GameState.BLIND_SELECT:
+                            input_processed = self.handle_blind_select_input()
+                        elif self.game.state == GameState.PLAYING:
+                            input_processed = self.handle_playing_input()
+                        elif self.game.state == GameState.ROUND_END:
+                            input_processed = self.handle_round_end_input()
+                        elif self.game.state == GameState.SHOP:
+                            input_processed = self.handle_shop_input()
+                        elif self.game.state == GameState.PACK_OPEN:
+                            input_processed = self.handle_pack_open_input()
+                        elif self.game.state == GameState.DECK_VIEW:
+                            input_processed = self.handle_deck_view_input()
+                        elif self.game.state == GameState.MAIN_MENU:
+                            input_processed = self.handle_main_menu_input()
                 
                 # 只有当处理了输入时，才立即刷新，否则等待
                 if input_processed:
@@ -124,6 +129,9 @@ class TUI:
                     time.sleep(0.05)
                 # 注意：Rich Live 的 update 会在下一次 refresh 时生效
                 # 或者我们可以显式调用 refresh() 如果 auto_refresh=False
+        finally:
+            # 恢复终端设置 (Linux/Mac)
+            self.input.stop()
 
 
     def handle_common_input(self):
