@@ -1,4 +1,3 @@
-import msvcrt
 import os
 import time
 from typing import List, Optional, Tuple
@@ -18,15 +17,16 @@ from .enums import GameState, BlindType
 from .blind import Blind
 from .hand_analysis import HandEvaluator, HandType
 from .joker import Joker
-from .consumable import Consumable
+from .consumable import Consumable, ConsumableType
 from .shop import ShopItem, ShopItemType
-
 from .deck import DeckType
+from .input_utils import InputHandler, Key
 
 class TUI:
     def __init__(self, game: Game):
         self.game = game
         self.console = Console()
+        self.input = InputHandler()
         self.selected_indices: set[int] = set()
         self.cursor_index = 0
         self.message = ""
@@ -71,7 +71,7 @@ class TUI:
                     # 游戏结束时仍然需要刷新一次以显示最终状态
                     live.update(self.render_layout(), refresh=True)
                     
-                    if msvcrt.kbhit():
+                    if self.input.has_input():
                          break
                     time.sleep(0.05)
                     continue
@@ -79,32 +79,18 @@ class TUI:
                 input_processed = False
                 
                 # Check for global toggle keys (like 'i' for run info)
-                if msvcrt.kbhit():
-                    # Peek or get key to check for 'i'
-                    # msvcrt doesn't support peek well for specific keys without consuming
-                    # So we need a better input handling strategy.
-                    # Let's integrate into each handler or have a pre-check.
-                    pass
+                # msvcrt removed, use self.input
+                # if msvcrt.kbhit(): pass 
                 
                 # Pre-check for 'i' key to toggle Run Info
                 # This is tricky with msvcrt as getch consumes the key.
                 # We'll implement it by checking inside the specific handlers or
                 # modifying the loop structure.
                 
-                # Better approach: 
-                # Let's add 'i' check to all input handlers or unify input handling.
-                # Since we have separate handlers, we can add a common check at the start of each.
-                # But that duplicates code.
-                
-                # Let's try to capture key first? No, context sensitive.
-                
-                # Let's just add 'i' to handle_playing_input, handle_shop_input, etc.
-                # Or, if show_run_info is True, we capture all input until closed.
-                
                 if self.show_run_info:
-                    if msvcrt.kbhit():
-                        key = msvcrt.getch()
-                        if key == b'i' or key == b'\x1b': # I or ESC to close
+                    key = self.input.get_key()
+                    if key:
+                        if key == 'i' or key == Key.ESCAPE: # I or ESC to close
                             self.show_run_info = False
                             input_processed = True
                         # Consume other keys or ignore
@@ -122,6 +108,8 @@ class TUI:
                         input_processed = self.handle_shop_input()
                     elif self.game.state == GameState.PACK_OPEN:
                         input_processed = self.handle_pack_open_input()
+                    elif self.game.state == GameState.DECK_VIEW:
+                        input_processed = self.handle_deck_view_input()
                     elif self.game.state == GameState.MAIN_MENU:
                         input_processed = self.handle_main_menu_input()
                 
@@ -140,41 +128,90 @@ class TUI:
 
     def handle_common_input(self):
         """处理全局通用按键 (如 I 键查看信息)"""
-        if msvcrt.kbhit():
-            key = msvcrt.getch()
-            
+        key = self.input.get_key()
+        if key:
             # I: Toggle Run Info
-            if key == b'i':
+            if key == 'i':
                 self.show_run_info = not self.show_run_info
                 return True
                 
             # ESC: Close Run Info if open
-            if key == b'\x1b' and self.show_run_info:
+            if key == Key.ESCAPE and self.show_run_info:
                 self.show_run_info = False
                 return True
                 
             return False
         return False
 
+    def handle_deck_view_input(self) -> bool:
+        key = self.input.get_key()
+        if key:
+            processed = True
+            
+            # Global keys check (I for run info)
+            if key == 'i':
+                self.show_run_info = not self.show_run_info
+                return True
+                
+            if key == Key.LEFT:
+                self.game.deck_cursor_index = max(0, self.game.deck_cursor_index - 1)
+            elif key == Key.RIGHT:
+                self.game.deck_cursor_index = min(len(self.game.deck.cards) - 1, self.game.deck_cursor_index + 1)
+            elif key == Key.UP:
+                # Move up a row (assuming 13 cards per row)
+                self.game.deck_cursor_index = max(0, self.game.deck_cursor_index - 13)
+            elif key == Key.DOWN:
+                self.game.deck_cursor_index = min(len(self.game.deck.cards) - 1, self.game.deck_cursor_index + 13)
+            
+            elif key == Key.ENTER:
+                if self.game.deck_view_selection_mode:
+                    # Select this card for the pending Tarot effect
+                    # Execute the consumable logic
+                    success = self.game.use_consumable(self.game.selected_consumable_index, self.game.deck_cursor_index)
+                    if success:
+                        self.message = "Consumable used on deck card!"
+                    else:
+                        self.message = "Failed to use consumable."
+                    
+                    # Return to shop
+                    self.game.state = GameState.SHOP
+                    self.game.deck_view_selection_mode = False
+                    self.game.selected_consumable_index = -1
+                else:
+                    # Just viewing, Enter does nothing or maybe flips card detail?
+                    pass
+            elif key == 'd' or key == 'q' or key == Key.ESCAPE: # D/Q/ESC to close
+                if self.game.deck_view_selection_mode:
+                    # Cancel selection
+                    self.game.state = GameState.SHOP
+                    self.game.deck_view_selection_mode = False
+                    self.game.selected_consumable_index = -1
+                    self.message = "Cancelled selection."
+                else:
+                    # Just close view
+                    self.game.state = GameState.SHOP # Assuming we came from Shop
+                    # Ideally we should store previous state
+            else:
+                processed = False
+                
+            return processed
+        return False
+
     def handle_main_menu_input(self) -> bool:
-        if msvcrt.kbhit():
-            key = msvcrt.getch()
+        key = self.input.get_key()
+        if key:
             processed = True
             
             decks = list(DeckType)
             
-            if key == b'\xe0': # Arrows
-                key = msvcrt.getch()
-                if key == b'H': # Up
-                    self.deck_select_index = max(0, self.deck_select_index - 1)
-                elif key == b'P': # Down
-                    self.deck_select_index = min(len(decks) - 1, self.deck_select_index + 1)
-                else:
-                    processed = False
-            elif key == b'\r': # Enter
+            if key == Key.UP:
+                self.deck_select_index = max(0, self.deck_select_index - 1)
+            elif key == Key.DOWN:
+                self.deck_select_index = min(len(decks) - 1, self.deck_select_index + 1)
+            elif key == Key.ENTER:
                 selected_deck = decks[self.deck_select_index]
                 self.game.start_game(selected_deck)
-            elif key == b'q':
+            elif key == 'q':
                 exit()
             else:
                 processed = False
@@ -184,23 +221,23 @@ class TUI:
 
     def handle_blind_select_input(self) -> bool:
         # Press Enter to start round, S to skip, Q to quit
-        if msvcrt.kbhit():
-            key = msvcrt.getch()
-            if key == b'\r': # Enter
+        key = self.input.get_key()
+        if key:
+            if key == Key.ENTER:
                 self.game.start_round()
                 return True
-            elif key == b's': # Skip
+            elif key == 's': # Skip
                 self.game.skip_blind()
                 return True
-            elif key == b'q':
+            elif key == 'q':
                 exit()
         return False
 
     def handle_round_end_input(self) -> bool:
         # Press Enter to go to Shop
-        if msvcrt.kbhit():
-            key = msvcrt.getch()
-            if key == b'\r':
+        key = self.input.get_key()
+        if key:
+            if key == Key.ENTER:
                 self.game.finish_round()
                 return True
         return False
@@ -212,50 +249,80 @@ class TUI:
         # R: Reroll
         # N: Next Round
         
-        if msvcrt.kbhit():
-            key = msvcrt.getch()
+        key = self.input.get_key()
+        if key:
             processed = True
             
-            if key == b'\xe0': # Arrows
-                key = msvcrt.getch()
-                if key == b'K': # Left
-                    self.shop_cursor_index = max(0, self.shop_cursor_index - 1)
-                elif key == b'M': # Right
-                    # Limit based on current zone
-                    max_idx = 0
-                    if self.shop_zone_index == 0: max_idx = len(self.game.joker_slots) - 1
-                    elif self.shop_zone_index == 1: max_idx = len(self.game.pack_slots) - 1
-                    elif self.shop_zone_index == 2: max_idx = 0
-                    self.shop_cursor_index = min(max_idx, self.shop_cursor_index + 1)
-                elif key == b'H': # Up
-                    if self.shop_zone_index > 0:
-                        self.shop_zone_index -= 1
-                        self.shop_cursor_index = 0
-                elif key == b'P': # Down
-                    if self.shop_zone_index < 2:
-                        self.shop_zone_index += 1
-                        self.shop_cursor_index = 0
+            if key == Key.LEFT:
+                self.shop_cursor_index = max(0, self.shop_cursor_index - 1)
+            elif key == Key.RIGHT:
+                # Limit based on current zone
+                max_idx = 0
+                if self.shop_zone_index == 0: max_idx = len(self.game.joker_slots) - 1
+                elif self.shop_zone_index == 1: max_idx = len(self.game.pack_slots) - 1
+                elif self.shop_zone_index == 2: max_idx = 0
+                self.shop_cursor_index = min(max_idx, self.shop_cursor_index + 1)
+            elif key == Key.UP:
+                if self.shop_zone_index > 0:
+                    self.shop_zone_index -= 1
+                    self.shop_cursor_index = 0
+            elif key == Key.DOWN:
+                if self.shop_zone_index < 3: # Increase to 3 for Inventory
+                    self.shop_zone_index += 1
+                    self.shop_cursor_index = 0
+            
+            elif key == Key.ENTER: # Buy / Use
+                if self.shop_zone_index == 3: # Inventory
+                    # Use consumable if selected
+                    if self.shop_cursor_index >= len(self.game.jokers):
+                        # It's a consumable
+                        cons_idx = self.shop_cursor_index - len(self.game.jokers)
+                        if 0 <= cons_idx < len(self.game.consumables):
+                            consumable = self.game.consumables[cons_idx]
+                            
+                            if consumable.type == ConsumableType.PLANET:
+                                # Use Planet immediately
+                                if self.game.use_consumable(cons_idx):
+                                    self.message = "Used Planet card!"
+                            elif consumable.type == ConsumableType.TAROT:
+                                # Use Tarot - Needs selection?
+                                # Check if it needs target. Most do.
+                                # Let's assume it does and open Deck View.
+                                self.game.state = GameState.DECK_VIEW
+                                self.game.deck_view_selection_mode = True
+                                self.game.selected_consumable_index = cons_idx
+                                self.game.deck_cursor_index = 0
+                                self.message = "Select a card from deck..."
+                                return processed # Return early
                 else:
-                    processed = False
-                    
-            elif key == b'\r': # Enter -> Buy
-                self.game.buy_item(self.shop_zone_index, self.shop_cursor_index)
+                    # Buy item logic
+                    self.game.buy_item(self.shop_zone_index, self.shop_cursor_index)
+                
                 # Adjust cursor if items reduced
                 max_idx = 0
                 if self.shop_zone_index == 0: max_idx = len(self.game.joker_slots) - 1
                 elif self.shop_zone_index == 1: max_idx = len(self.game.pack_slots) - 1
                 elif self.shop_zone_index == 2: max_idx = 0 if self.game.voucher_slot else -1
+                elif self.shop_zone_index == 3: max_idx = len(self.game.jokers) + len(self.game.consumables) - 1
                 self.shop_cursor_index = max(0, min(self.shop_cursor_index, max_idx))
                         
-            elif key == b'r': # Reroll
+            elif key == 'r': # Reroll
                 if self.game.reroll_shop():
                     self.shop_cursor_index = 0
                     self.shop_zone_index = 0
                 else:
                     self.message = "Not enough money to reroll!"
                     
-            elif key == b'n': # Next Round
+            elif key == 'n': # Next Round
                 self.game.next_round()
+            
+            elif key == 'd': # Deck View
+                self.game.state = GameState.DECK_VIEW
+                self.game.deck_view_selection_mode = False
+            
+            elif key == 'i': # Global keys
+                self.show_run_info = not self.show_run_info
+                return True
                 
             else:
                 processed = False
@@ -264,27 +331,23 @@ class TUI:
         return False
 
     def handle_pack_open_input(self) -> bool:
-        if msvcrt.kbhit():
-            key = msvcrt.getch()
+        key = self.input.get_key()
+        if key:
             processed = True
             
             # Global keys
-            if key == b'i':
+            if key == 'i':
                 self.show_run_info = not self.show_run_info
                 return True
 
-            if key == b'\xe0': # Arrows
-                key = msvcrt.getch()
-                if key == b'K': # Left
-                    self.pack_cursor_index = max(0, self.pack_cursor_index - 1)
-                elif key == b'M': # Right
-                    self.pack_cursor_index = min(len(self.game.pack_choices) - 1, self.pack_cursor_index + 1)
-                else:
-                    processed = False
-            elif key == b'\r': # Enter -> Select
+            if key == Key.LEFT:
+                self.pack_cursor_index = max(0, self.pack_cursor_index - 1)
+            elif key == Key.RIGHT:
+                self.pack_cursor_index = min(len(self.game.pack_choices) - 1, self.pack_cursor_index + 1)
+            elif key == Key.ENTER:
                 self.game.select_pack_item(self.pack_cursor_index)
                 self.pack_cursor_index = 0 # Reset cursor
-            elif key == b's': # Skip
+            elif key == 's': # Skip
                 self.game.skip_pack()
                 self.pack_cursor_index = 0
             else:
@@ -294,58 +357,54 @@ class TUI:
         return False
 
     def handle_playing_input(self) -> bool:
-        if msvcrt.kbhit():
-            key = msvcrt.getch()
+        key = self.input.get_key()
+        if key:
             processed = True
             
             # Global keys
-            if key == b'i':
+            if key == 'i':
                 self.show_run_info = not self.show_run_info
                 return True
             
             # Handle special keys (arrows)
-            if key == b'\xe0':
-                key = msvcrt.getch()
-                if key == b'H': # Up
-                    if self.focus_area == "consumables":
-                        self.focus_area = "actions"
-                    elif self.focus_area == "actions":
-                        self.focus_area = "hand"
-                        self.cursor_index = min(self.cursor_index, len(self.game.hand) - 1)
-                    elif self.focus_area == "hand" and self.game.jokers:
-                        self.focus_area = "jokers"
-                        self.joker_index = 0
-                elif key == b'P': # Down
-                    if self.focus_area == "jokers":
-                        self.focus_area = "hand"
-                    elif self.focus_area == "hand":
-                        self.focus_area = "actions"
-                        self.action_index = 0
-                    elif self.focus_area == "actions" and self.game.consumables:
-                        self.focus_area = "consumables"
-                        self.consumable_index = 0
-                elif key == b'K': # Left
-                    if self.focus_area == "hand":
-                        self.cursor_index = max(0, self.cursor_index - 1)
-                    elif self.focus_area == "actions":
-                        self.action_index = max(0, self.action_index - 1)
-                    elif self.focus_area == "jokers":
-                        self.joker_index = max(0, self.joker_index - 1)
-                    elif self.focus_area == "consumables":
-                        self.consumable_index = max(0, self.consumable_index - 1)
-                elif key == b'M': # Right
-                    if self.focus_area == "hand":
-                        self.cursor_index = min(len(self.game.hand) - 1, self.cursor_index + 1)
-                    elif self.focus_area == "actions":
-                        self.action_index = min(1, self.action_index + 1)
-                    elif self.focus_area == "jokers":
-                        self.joker_index = min(len(self.game.jokers) - 1, self.joker_index + 1)
-                    elif self.focus_area == "consumables":
-                        self.consumable_index = min(len(self.game.consumables) - 1, self.consumable_index + 1)
-                else:
-                    processed = False
+            if key == Key.UP:
+                if self.focus_area == "consumables":
+                    self.focus_area = "actions"
+                elif self.focus_area == "actions":
+                    self.focus_area = "hand"
+                    self.cursor_index = min(self.cursor_index, len(self.game.hand) - 1)
+                elif self.focus_area == "hand" and self.game.jokers:
+                    self.focus_area = "jokers"
+                    self.joker_index = 0
+            elif key == Key.DOWN:
+                if self.focus_area == "jokers":
+                    self.focus_area = "hand"
+                elif self.focus_area == "hand":
+                    self.focus_area = "actions"
+                    self.action_index = 0
+                elif self.focus_area == "actions" and self.game.consumables:
+                    self.focus_area = "consumables"
+                    self.consumable_index = 0
+            elif key == Key.LEFT:
+                if self.focus_area == "hand":
+                    self.cursor_index = max(0, self.cursor_index - 1)
+                elif self.focus_area == "actions":
+                    self.action_index = max(0, self.action_index - 1)
+                elif self.focus_area == "jokers":
+                    self.joker_index = max(0, self.joker_index - 1)
+                elif self.focus_area == "consumables":
+                    self.consumable_index = max(0, self.consumable_index - 1)
+            elif key == Key.RIGHT:
+                if self.focus_area == "hand":
+                    self.cursor_index = min(len(self.game.hand) - 1, self.cursor_index + 1)
+                elif self.focus_area == "actions":
+                    self.action_index = min(1, self.action_index + 1)
+                elif self.focus_area == "jokers":
+                    self.joker_index = min(len(self.game.jokers) - 1, self.joker_index + 1)
+                elif self.focus_area == "consumables":
+                    self.consumable_index = min(len(self.game.consumables) - 1, self.consumable_index + 1)
             
-            elif key == b' ': # Space to toggle selection
+            elif key == Key.SPACE: # Space to toggle selection
                 if self.focus_area == "hand":
                     if self.cursor_index in self.selected_indices:
                         self.selected_indices.remove(self.cursor_index)
@@ -357,7 +416,7 @@ class TUI:
                 else:
                     processed = False
 
-            elif key == b'\r': # Enter to confirm
+            elif key == Key.ENTER: # Enter to confirm
                 if self.focus_area == "actions":
                     if self.action_index == 0: # Play
                         self.play_hand()
@@ -387,11 +446,11 @@ class TUI:
                 else:
                     processed = False
             
-            elif key == b'q':
+            elif key == 'q':
                 exit()
             
             # Debug Keys
-            elif key == b'F': # Shift+F: Force Flush
+            elif key == 'F': # Shift+F: Force Flush
                 self.game.debug_create_flush()
                 self.message = "Debug: 生成同花!"
                 self.selected_indices.clear()
@@ -480,6 +539,8 @@ class TUI:
             layout.update(self.render_shop())
         elif self.game.state == GameState.PACK_OPEN:
             layout.update(self.render_pack_open())
+        elif self.game.state == GameState.DECK_VIEW:
+            layout.update(self.render_deck_view())
         elif self.game.state == GameState.MAIN_MENU:
             layout.update(self.render_main_menu())
         elif self.game.state == GameState.GAME_OVER:
@@ -638,15 +699,55 @@ class TUI:
 
         
         # Owned Jokers & Consumables
-        inventory_table = Table(title="Inventory", box=box.SIMPLE, show_header=True)
-        inventory_table.add_column("Jokers", style="bold blue")
-        inventory_table.add_column("Consumables", style="bold magenta")
+        inventory_title = "Inventory"
+        if self.shop_zone_index == 3:
+            inventory_title = "Inventory (Select/Use)"
+            
+        inventory_grid = Table.grid(padding=1)
         
-        jokers_str = "\n".join([f"- {j.name_cn}" for j in self.game.jokers]) if self.game.jokers else "None"
-        consumables_str = "\n".join([f"- {c.name_cn}" for c in self.game.consumables]) if self.game.consumables else "None"
+        # Combine Jokers and Consumables into a list of panels
+        inv_panels = []
         
-        inventory_table.add_row(jokers_str, consumables_str)
-
+        # Jokers
+        for i, joker in enumerate(self.game.jokers):
+            style = "blue"
+            box_type = box.ROUNDED
+            if self.shop_zone_index == 3 and self.shop_cursor_index == i:
+                style = "bold yellow"
+                box_type = box.HEAVY
+            
+            p = Panel(
+                Text(joker.name_cn, justify="center"),
+                border_style=style,
+                box=box_type,
+                width=16,
+                title="Joker"
+            )
+            inv_panels.append(p)
+            
+        # Consumables
+        offset = len(self.game.jokers)
+        for i, cons in enumerate(self.game.consumables):
+            style = "magenta"
+            box_type = box.ROUNDED
+            if self.shop_zone_index == 3 and self.shop_cursor_index == (offset + i):
+                style = "bold yellow"
+                box_type = box.HEAVY
+            
+            p = Panel(
+                Text(cons.name_cn, justify="center"),
+                border_style=style,
+                box=box_type,
+                width=16,
+                title=cons.type.name
+            )
+            inv_panels.append(p)
+            
+        if not inv_panels:
+            inv_panels.append(Text("Empty Inventory", style="dim"))
+            
+        inventory_grid.add_row(*inv_panels)
+        
         # Layout
         content = Table.grid(expand=True)
         content.add_column(justify="center")
@@ -683,9 +784,15 @@ class TUI:
              content.add_row(*voucher_zone_row)
         
         content.add_row("")
-        content.add_row(inventory_table)
+        
+        # Zone 4: Inventory
+        inv_title_text = Text(inventory_title, style="bold white")
+        if self.shop_zone_index == 3: inv_title_text.style = "reverse bold white"
+        content.add_row(inv_title_text)
+        content.add_row(inventory_grid)
+        
         content.add_row("")
-        content.add_row(Text("Controls: Arrows=Select, Enter=Buy, R=Reroll, N=Next Round", style="dim"))
+        content.add_row(Text("Controls: Arrows=Select, Enter=Buy/Use, R=Reroll, N=Next Round, D=Deck", style="dim"))
         
         return Panel(content, title="Shop")
 
@@ -752,6 +859,63 @@ class TUI:
         layout.add_row(Text("Controls: Arrows=Select, Enter=Confirm, S=Skip", style="dim"))
         
         return Panel(layout, title="Pack Open")
+
+    def render_deck_view(self) -> Panel:
+        deck = self.game.deck.cards
+        
+        # Grid of cards (13 per row)
+        grid = Table.grid(padding=1)
+        
+        # Create chunks of 13
+        chunks = [deck[i:i + 13] for i in range(0, len(deck), 13)]
+        
+        current_idx = 0
+        for chunk in chunks:
+            row_panels = []
+            for card in chunk:
+                style = "white"
+                if card.suit in (Suit.HEARTS, Suit.DIAMONDS):
+                    style = "red"
+                
+                is_cursor = (current_idx == self.game.deck_cursor_index)
+                
+                card_text = self.get_card_art(card)
+                
+                border_style = style
+                box_type = box.ROUNDED
+                if is_cursor:
+                    border_style = "bold yellow"
+                    box_type = box.HEAVY
+                
+                panel = Panel(
+                    card_text,
+                    border_style=border_style,
+                    box=box_type,
+                    width=8,
+                    height=3
+                )
+                row_panels.append(panel)
+                current_idx += 1
+            grid.add_row(*row_panels)
+            
+        layout = Table.grid(expand=True)
+        layout.add_column(justify="center")
+        
+        title_text = "FULL DECK VIEW"
+        if self.game.deck_view_selection_mode:
+            title_text = "SELECT A CARD"
+            
+        layout.add_row(Text(title_text, style="bold yellow"))
+        layout.add_row("")
+        layout.add_row(grid)
+        layout.add_row("")
+        
+        if self.game.deck_view_selection_mode:
+            layout.add_row(Text("Controls: Arrows=Move, Enter=Select, D/Q=Cancel", style="dim"))
+        else:
+            layout.add_row(Text("Controls: Arrows=Move, D/Q=Close", style="dim"))
+            
+        return Panel(layout, title="Deck")
 
     def render_main_menu(self) -> Panel:
         from .deck import DeckType
@@ -842,19 +1006,47 @@ class TUI:
 
     def render_score_area(self) -> Panel:
         # Calculate potential score of selected cards
-        potential_text = ""
+        breakdown_text = ""
+        score_info = {}
+        
         if self.selected_indices:
-            # 使用 Game 类的 calculate_potential_score 方法，包含 Joker 效果
-            score, chips, mult = self.game.calculate_potential_score(list(self.selected_indices))
-            selected_cards = [self.game.hand[i] for i in self.selected_indices if i < len(self.game.hand)]
-            if selected_cards:
-                hand_type = HandEvaluator.evaluate(selected_cards)
-                potential_text = f" | 选中: {hand_type.name} ({chips} x {mult} = {score})"
-
+            score_info = self.game.calculate_potential_score(list(self.selected_indices))
+            hand_name = score_info["hand_name"]
+            
+            if hand_name != "None":
+                # Build breakdown string
+                # Format: "Base: 30x4 | Cards: +11 Chips, +4 Mult | Jokers: +15 Mult | Total: 41 x 23 = 943"
+                
+                base_str = f"Base: {score_info['base_chips']}x{score_info['base_mult']}"
+                
+                # Cards Breakdown
+                card_parts = []
+                if score_info['card_chips'] > 0: card_parts.append(f"+{score_info['card_chips']}C")
+                if score_info['card_mult'] > 0: card_parts.append(f"+{score_info['card_mult']}M")
+                if score_info['card_xmult'] > 1.0: card_parts.append(f"x{score_info['card_xmult']:.1f}")
+                if not card_parts: card_parts.append("-")
+                card_str = f"Cards: {', '.join(card_parts)}"
+                
+                # Jokers Breakdown
+                joker_parts = []
+                if score_info['joker_chips'] > 0: joker_parts.append(f"+{score_info['joker_chips']}C")
+                if score_info['joker_mult'] > 0: joker_parts.append(f"+{score_info['joker_mult']}M")
+                if score_info['joker_xmult'] > 1.0: joker_parts.append(f"x{score_info['joker_xmult']:.1f}")
+                if not joker_parts: joker_parts.append("-")
+                joker_str = f"Jokers: {', '.join(joker_parts)}"
+                
+                total_str = f"Total: {score_info['total_chips']} x {score_info['total_mult']} = {score_info['final_score']}"
+                
+                # Ensure all parts are shown
+                parts = [base_str, card_str, joker_str]
+                
+                breakdown_text = f" | 选中: {hand_name}\n" + " | ".join(parts) + f"\n{total_str}"
+        
         content = Text()
         content.append(f"目标分数: {self.game.target_score}\n", style="bold")
         content.append(f"当前分数: {self.game.current_score}", style="blue")
-        content.append(potential_text, style="dim")
+        if breakdown_text:
+            content.append(breakdown_text, style="dim")
         
         return Panel(content, title="计分板", border_style="blue")
 

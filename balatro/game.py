@@ -35,6 +35,10 @@ class Game:
         self.reroll_cost = 5
         self.reroll_base_cost = 5
         
+        # Deck View State
+        self.deck_view_selection_mode = False # Whether we are selecting a card for Tarot
+        self.selected_consumable_index = -1 # Which consumable initiated the selection
+        
         # 牌型等级系统
         # 格式: {HandType: {"level": 1, "chips": 10, "mult": 2}}
         self.hand_levels = self._init_hand_levels()
@@ -192,8 +196,21 @@ class Game:
             for _ in range(3):
                 # Random card
                 card = Card(random.choice(list(Suit)), random.choice(list(Rank)))
-                # 30% chance for enhancement/edition
-                # Simplified: just base cards for now or random enhancement
+                
+                # 30% chance for enhancement
+                if random.random() < 0.3:
+                    # Random enhancement (skip BASE, STONE is 1)
+                    # Simple way: choice from CardType 1-8
+                    import random as rnd # Ensure random is available
+                    enh_type = CardType(rnd.randint(1, 8))
+                    card.enhancement = enh_type
+                    
+                # 10% chance for edition (independent)
+                if random.random() < 0.1:
+                    from .card import CardEdition
+                    # Random edition 1-3 (skip NEGATIVE for now as it's rare/special)
+                    card.edition = CardEdition(random.randint(1, 3))
+                
                 # We need a way to represent Playing Card in ShopItem
                 # Let's reuse PLANET type temporarily but mark payload as Card
                 # Ideally we should add CARD type to ShopItemType
@@ -263,10 +280,30 @@ class Game:
             
         consumable = self.consumables[index]
         target_card = None
-        if target_card_index is not None and 0 <= target_card_index < len(self.hand):
-            target_card = self.hand[target_card_index]
+        
+        # Determine target
+        # If in SHOP and using Tarot that needs target:
+        # We assume target_card_index refers to DECK index if state is DECK_VIEW or we handle it specially.
+        # But UI handles the mapping. 
+        # If we are in SHOP, target_card_index should be index in self.deck.cards
+        
+        if target_card_index is not None:
+            if self.state == GameState.PLAYING:
+                if 0 <= target_card_index < len(self.hand):
+                    target_card = self.hand[target_card_index]
+            else: # Shop or other states (Deck View)
+                if 0 <= target_card_index < len(self.deck.cards):
+                    target_card = self.deck.cards[target_card_index]
             
         if consumable.use(self, target_card):
+            # If it's a Tarot that was used from Shop on a deck card, we might need to remove it.
+            # But wait, consumables list is in Game.
+            # If use() returns True, it means effect succeeded.
+            # We should remove it from consumables list.
+            
+            # Special case: If we are in Deck View selection mode initiated by a consumable,
+            # we need to make sure we remove the correct one.
+            # The 'index' passed here is the index in self.consumables.
             self.consumables.pop(index)
             return True
         return False
@@ -397,10 +434,16 @@ class Game:
             if card:
                 self.hand.append(card)
 
-    def calculate_potential_score(self, card_indices: List[int]) -> Tuple[int, int, int]:
-        """计算选中牌的潜在得分（包含 Joker 效果）"""
+    def calculate_potential_score(self, card_indices: List[int]) -> Dict[str, Any]:
+        """计算选中牌的潜在得分（包含详细 Breakdown）"""
         if not card_indices:
-            return 0, 0, 0
+            return {
+                "base_chips": 0, "base_mult": 0,
+                "card_chips": 0, "card_mult": 0, "card_xmult": 1.0,
+                "joker_chips": 0, "joker_mult": 0, "joker_xmult": 1.0,
+                "total_chips": 0, "total_mult": 0, "final_score": 0,
+                "hand_name": "None"
+            }
             
         selected_cards = [self.hand[i] for i in sorted(card_indices)]
         
@@ -412,11 +455,17 @@ class Game:
         base_chips = hand_level["chips"]
         base_mult = hand_level["mult"]
         
-        # 计算卡牌筹码
-        card_chips = sum(card.get_value() for card in selected_cards)
+        # Breakdown vars
+        card_chips_total = 0
+        card_mult_total = 0
+        card_xmult_total = 1.0
         
-        # 总筹码 = 基础筹码 + 卡牌筹码
-        chips = base_chips + card_chips
+        joker_chips_total = 0
+        joker_mult_total = 0
+        joker_xmult_total = 1.0
+        
+        # Temp totals
+        chips = base_chips
         mult = base_mult
         
         # 3. 计算 Joker 效果 (Balatro 的核心计分链)
@@ -424,36 +473,54 @@ class Game:
         # A. 遍历每一张计分的卡牌
         for card in selected_cards:
             # 1. 基础卡牌加成 (Enhancements & Editions)
-            chips += card.get_chip_bonus()
-            mult += card.get_mult_bonus()
-            mult = int(mult * card.get_xmult_bonus())
+            c_chips = card.get_value() + card.get_chip_bonus()
+            c_mult = card.get_mult_bonus()
+            c_xmult = card.get_xmult_bonus()
+            
+            card_chips_total += c_chips
+            card_mult_total += c_mult
+            if c_xmult > 1.0:
+                 card_xmult_total *= c_xmult
+            
+            chips += c_chips
+            mult += c_mult
+            mult = int(mult * c_xmult)
             
             # 2. 触发 Joker: ON_CARD_SCORED
             effects = self._get_joker_effects(card, JokerEvent.ON_CARD_SCORED)
             for eff in effects:
+                joker_chips_total += eff.chips
+                joker_mult_total += eff.mult
+                if eff.xmult > 0:
+                    joker_xmult_total *= eff.xmult
+                
                 chips += eff.chips
                 mult += eff.mult
                 if eff.xmult > 0:
                     mult = int(mult * eff.xmult)
         
         # A2. 遍历手牌中未打出的牌 (触发钢卡等 Held in hand 效果)
-        # 注意：在 Balatro 中，Held in Hand 效果通常是在所有计分卡结算完之后触发
         remaining_hand = [c for i, c in enumerate(self.hand) if i not in card_indices]
         for card in remaining_hand:
-            # 钢卡效果: 手持时 x1.5 Mult
+            # 钢卡效果
             if card.enhancement == CardType.STEEL:
+                card_xmult_total *= 1.5
                 mult = int(mult * 1.5)
             
             # 触发 Joker: ON_CARD_HELD
             effects = self._get_joker_effects(card, JokerEvent.ON_CARD_HELD)
             for eff in effects:
+                joker_chips_total += eff.chips
+                joker_mult_total += eff.mult
+                if eff.xmult > 0:
+                    joker_xmult_total *= eff.xmult
+                    
                 chips += eff.chips
                 mult += eff.mult
                 if eff.xmult > 0:
                     mult = int(mult * eff.xmult)
         
-        # B. 触发独立 Joker 效果 (INDEPENDENT) - 大多数加倍率的 Joker 在这里
-        # 注意：这里需要传入当前上下文，包括手牌类型、打出的牌、金钱等
+        # B. 触发独立 Joker 效果 (INDEPENDENT)
         effects = self._get_joker_effects(None, JokerEvent.INDEPENDENT, {
             'hand_type': hand_type,
             'played_cards': selected_cards,
@@ -463,13 +530,25 @@ class Game:
             'max_jokers': self.max_jokers
         })
         for eff in effects:
+            joker_chips_total += eff.chips
+            joker_mult_total += eff.mult
+            if eff.xmult > 0:
+                joker_xmult_total *= eff.xmult
+                
             chips += eff.chips
             mult += eff.mult
             if eff.xmult > 0:
                 mult = int(mult * eff.xmult)
         
         final_score = chips * mult
-        return final_score, chips, mult
+        
+        return {
+            "base_chips": base_chips, "base_mult": base_mult,
+            "card_chips": card_chips_total, "card_mult": card_mult_total, "card_xmult": card_xmult_total,
+            "joker_chips": joker_chips_total, "joker_mult": joker_mult_total, "joker_xmult": joker_xmult_total,
+            "total_chips": chips, "total_mult": mult, "final_score": final_score,
+            "hand_name": hand_type.name
+        }
 
     def play_hand(self, card_indices: List[int]):
         """出牌逻辑"""
